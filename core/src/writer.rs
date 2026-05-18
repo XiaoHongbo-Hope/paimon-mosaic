@@ -23,6 +23,7 @@ use arrow_schema::Schema;
 use crate::bucket_writer::{BucketWriter, PagedBucketOutput};
 use crate::schema::MosaicSchema;
 use crate::spec::*;
+use crate::stats::{self, ColumnStats, StatsCollector};
 use crate::varint;
 
 fn to_u32(val: usize, field: &str) -> io::Result<u32> {
@@ -47,6 +48,7 @@ pub struct WriterOptions {
     pub row_group_max_size: u64,
     pub max_dict_total_bytes: usize,
     pub max_dict_entries: usize,
+    pub stats_columns: Vec<usize>,
     pub page_size_threshold: usize,
 }
 
@@ -59,6 +61,7 @@ impl Default for WriterOptions {
             row_group_max_size: DEFAULT_ROW_GROUP_MAX_SIZE,
             max_dict_total_bytes: DEFAULT_DICT_MAX_TOTAL_BYTES,
             max_dict_entries: DEFAULT_DICT_MAX_ENTRIES,
+            stats_columns: Vec::new(),
             page_size_threshold: DEFAULT_PAGE_SIZE_THRESHOLD,
         }
     }
@@ -68,6 +71,7 @@ struct RowGroupMeta {
     num_rows: usize,
     bucket_offsets: Vec<u64>,
     bucket_layouts: Vec<BucketLayout>,
+    stats: Vec<ColumnStats>,
 }
 
 pub struct MosaicWriter<S: OutputFile> {
@@ -87,6 +91,7 @@ pub struct MosaicWriter<S: OutputFile> {
     compression_ratio: f64,
     total_uncompressed: u64,
     total_compressed: u64,
+    stats_collector: Option<StatsCollector>,
     closed: bool,
 }
 
@@ -118,6 +123,25 @@ impl<S: OutputFile> MosaicWriter<S> {
             }
         }
 
+        let stats_collector = if options.stats_columns.is_empty() {
+            None
+        } else {
+            let cols: Vec<(usize, arrow_schema::DataType)> = options
+                .stats_columns
+                .iter()
+                .filter(|&&idx| {
+                    idx < schema.columns.len()
+                        && stats::supports_stats(&schema.columns[idx].data_type)
+                })
+                .map(|&idx| (idx, schema.columns[idx].data_type.clone()))
+                .collect();
+            if cols.is_empty() {
+                None
+            } else {
+                Some(StatsCollector::new(&cols))
+            }
+        };
+
         let active_buckets: Vec<usize> = bucket_writers
             .iter()
             .enumerate()
@@ -146,6 +170,7 @@ impl<S: OutputFile> MosaicWriter<S> {
             compression_ratio,
             total_uncompressed: 0,
             total_compressed: 0,
+            stats_collector,
             closed: false,
         }
     }
@@ -213,6 +238,10 @@ impl<S: OutputFile> MosaicWriter<S> {
                 .collect();
             let bw = self.bucket_writers[b].as_mut().unwrap();
             size += bw.write_columns(&arrays, &data_types)? as u64;
+        }
+
+        if let Some(ref mut collector) = self.stats_collector {
+            collector.update_batch(batch);
         }
 
         self.current_row_group_rows += batch.num_rows();
@@ -307,10 +336,16 @@ impl<S: OutputFile> MosaicWriter<S> {
             self.bucket_writers[b].as_mut().unwrap().reset();
         }
 
+        let row_stats = match &mut self.stats_collector {
+            Some(collector) => collector.finish(),
+            None => Vec::new(),
+        };
+
         self.row_group_metas.push(RowGroupMeta {
             num_rows: self.current_row_group_rows,
             bucket_offsets,
             bucket_layouts,
+            stats: row_stats,
         });
 
         self.current_row_group_rows = 0;
@@ -464,6 +499,8 @@ impl<S: OutputFile> MosaicWriter<S> {
                     );
                 }
             }
+            let stats_bytes = stats::serialize_stats(&meta.stats, &self.schema.columns);
+            index_buf.extend_from_slice(&stats_bytes);
         }
         self.out.write(&index_buf)?;
 

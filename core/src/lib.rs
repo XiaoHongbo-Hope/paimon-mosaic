@@ -21,6 +21,7 @@ pub mod bucket_writer;
 pub mod reader;
 pub mod schema;
 pub mod spec;
+pub mod stats;
 pub mod types;
 pub mod values;
 pub mod varint;

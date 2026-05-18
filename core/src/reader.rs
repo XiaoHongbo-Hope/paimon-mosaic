@@ -24,6 +24,7 @@ use arrow_schema::{DataType, Field, Schema};
 use crate::bucket_reader::{read_typed_value, read_variable_value, BucketReader, ColumnPageReader};
 use crate::schema::MosaicSchema;
 use crate::spec::*;
+use crate::stats::{self, ColumnStats};
 use crate::types;
 use crate::values::Value;
 use crate::varint;
@@ -122,6 +123,7 @@ pub struct RowGroupMeta {
     pub num_rows: usize,
     pub bucket_offsets: Vec<u64>,
     pub bucket_layouts: Vec<BucketLayout>,
+    pub stats: Vec<ColumnStats>,
 }
 
 pub trait ReaderAccess {
@@ -133,6 +135,7 @@ pub trait ReaderAccess {
         rg_index: usize,
         columns: &[usize],
     ) -> io::Result<RowGroupReader>;
+    fn row_group_stats(&self, rg_index: usize) -> io::Result<&[ColumnStats]>;
 }
 
 pub struct MosaicReader<I: InputFile> {
@@ -307,10 +310,14 @@ impl<I: InputFile> MosaicReader<I> {
                 }
             }
 
+            let rg_stats =
+                stats::deserialize_stats(index_data, &mut pos, &schema.columns, num_rows)?;
+
             row_group_metas.push(RowGroupMeta {
                 num_rows,
                 bucket_offsets,
                 bucket_layouts,
+                stats: rg_stats,
             });
         }
 
@@ -395,6 +402,20 @@ impl<I: InputFile> ReaderAccess for MosaicReader<I> {
 
     fn num_row_groups(&self) -> usize {
         self.row_group_metas.len()
+    }
+
+    fn row_group_stats(&self, rg_index: usize) -> io::Result<&[ColumnStats]> {
+        if rg_index >= self.row_group_metas.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "row group index {} out of range (num_row_groups={})",
+                    rg_index,
+                    self.row_group_metas.len()
+                ),
+            ));
+        }
+        Ok(&self.row_group_metas[rg_index].stats)
     }
 
     fn row_group_reader(&self, rg_index: usize) -> io::Result<RowGroupReader> {
@@ -816,3 +837,7 @@ impl RowGroupReader {
             .map_err(|e| io::Error::other(e.to_string()))
     }
 }
+
+#[cfg(test)]
+#[path = "reader_tests.rs"]
+mod tests;
