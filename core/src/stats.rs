@@ -44,7 +44,7 @@ pub fn supports_stats(dt: &DataType) -> bool {
             | DataType::Float64
             | DataType::Date32
             | DataType::Time32(_)
-            | DataType::Decimal128(_, _)
+            | DataType::Decimal128(0..=18, _)
             | DataType::Timestamp(_, _)
             | DataType::Utf8
     ) || matches!(dt, DataType::Struct(fields) if types::is_timestamp_nanos_struct(fields))
