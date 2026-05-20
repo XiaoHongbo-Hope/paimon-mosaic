@@ -21,8 +21,9 @@ import os
 import platform
 import shutil
 
-from setuptools import setup
+from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
+from wheel.bdist_wheel import bdist_wheel
 
 
 def _lib_name():
@@ -63,4 +64,26 @@ class BuildPyWithNativeLib(build_py):
         super().run()
 
 
-setup(cmdclass={"build_py": BuildPyWithNativeLib})
+class PlatformWheel(bdist_wheel):
+    """Tag wheel as py3-none-{platform} since this is a ctypes package."""
+
+    def finalize_options(self):
+        bdist_wheel.finalize_options(self)
+        self.root_is_pure = False
+
+    def get_tag(self):
+        _, _, plat = bdist_wheel.get_tag(self)
+        return "py3", "none", plat
+
+
+class BinaryDistribution(Distribution):
+    """Force the wheel to be platform-specific."""
+
+    def has_ext_modules(self):
+        return True
+
+
+setup(
+    cmdclass={"build_py": BuildPyWithNativeLib, "bdist_wheel": PlatformWheel},
+    distclass=BinaryDistribution,
+)
